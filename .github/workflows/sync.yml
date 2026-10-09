@@ -25,11 +25,14 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}.git
-      SYNC_DIR: ${{ runner.temp }}/pi-sync
     defaults:
       run:
         shell: bash
     steps:
+      - name: Set workspace
+        run: |
+          echo "SYNC_DIR=$RUNNER_TEMP/pi-sync" >> "$GITHUB_ENV"
+
       - name: Resolve release
         id: release
         env:

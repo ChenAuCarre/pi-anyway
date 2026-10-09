@@ -18,11 +18,17 @@ def step(name):
     return textwrap.dedent(block.split("        run: |\n", 1)[1])
 
 
-for name in ("Resolve release", "Download official assets", "Prepare artifacts", "Store distribution branch"):
+assert "${{ runner.temp }}" not in workflow
+
+for name in ("Set workspace", "Resolve release", "Download official assets", "Prepare artifacts", "Store distribution branch"):
     subprocess.run(["bash", "-n", "-c", step(name)], check=True)
 
 with tempfile.TemporaryDirectory(prefix="pi sync test ") as temporary:
     root = Path(temporary)
+    github_env = root / "github-env"
+    subprocess.run(["bash", "-e", "-c", step("Set workspace")], check=True,
+                   env={**os.environ, "RUNNER_TEMP": str(root), "GITHUB_ENV": str(github_env)})
+    assert github_env.read_text() == f"SYNC_DIR={root}/pi-sync\n"
     filename = "pi-windows-x64.zip"
     prepare = step("Prepare artifacts")
     for size in (37, 50_000_000, 50_000_001, 75_000_000):
