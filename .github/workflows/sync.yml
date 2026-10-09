@@ -1,0 +1,160 @@
+name: Sync official pi release
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact upstream tag (for example, v1.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# ponytail: serialize all syncs; per-tag locking only if throughput matters.
+concurrency:
+  group: sync-official-pi-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}.git
+      SYNC_DIR: ${{ runner.temp }}/pi-sync
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Resolve release
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          endpoint='repos/earendil-works/pi/releases/latest'
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$INPUT_TAG" =~ $tag_pattern ]] || { echo 'Invalid upstream tag' >&2; exit 1; }
+            endpoint="repos/earendil-works/pi/releases/tags/$INPUT_TAG"
+          fi
+          mkdir -p "$SYNC_DIR"
+          gh api "$endpoint" > "$SYNC_DIR/release.json"
+          tag=$(jq -er '.tag_name' "$SYNC_DIR/release.json")
+          [[ "$tag" =~ $tag_pattern ]] || { echo 'Invalid release tag' >&2; exit 1; }
+          jq -e '.draft == false' "$SYNC_DIR/release.json" > /dev/null
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$tag" == "$INPUT_TAG" ]] || { echo 'Release tag mismatch' >&2; exit 1; }
+          else
+            jq -e '.prerelease == false' "$SYNC_DIR/release.json" > /dev/null
+            [[ "$tag" != *-* ]] || { echo 'Latest release is not stable' >&2; exit 1; }
+          fi
+          branch="dist/windows-x64/$tag"
+          git check-ref-format "refs/heads/$branch"
+          gh auth setup-git
+          existing=$(git ls-remote --heads "$REPOSITORY_URL" "refs/heads/$branch")
+          if [[ -n "$existing" ]]; then
+            echo "Already synchronized: $branch"
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Download official assets
+        if: steps.release.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo earendil-works/pi \
+            --pattern pi-windows-x64.zip --pattern SHA256SUMS \
+            --dir "$SYNC_DIR/download"
+
+      - name: Prepare artifacts
+        if: steps.release.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import shutil
+          from pathlib import Path
+
+          root = Path(os.environ["SYNC_DIR"])
+          release = json.loads((root / "release.json").read_text())
+          filename = "pi-windows-x64.zip"
+          source = root / "download" / filename
+          entries = []
+          for line in (source.parent / "SHA256SUMS").read_text().splitlines():
+              fields = line.split()
+              if len(fields) == 2 and fields[1] in (filename, "*" + filename):
+                  entries.append(fields[0])
+          if len(entries) != 1 or not re.fullmatch(r"[0-9a-fA-F]{64}", entries[0]):
+              raise SystemExit("Missing, duplicate, or invalid checksum entry")
+          digest = hashlib.sha256()
+          with source.open("rb") as stream:
+              for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                  digest.update(chunk)
+          if digest.hexdigest() != entries[0].lower():
+              raise SystemExit("ZIP checksum mismatch")
+          assets = [asset for asset in release["assets"] if asset["name"] == filename]
+          if len(assets) != 1:
+              raise SystemExit("Missing or duplicate ZIP asset")
+          asset = assets[0]
+          size = source.stat().st_size
+          if size == 0 or size != asset["size"]:
+              raise SystemExit("Asset size mismatch")
+          destination = root / "distribution"
+          destination.mkdir()
+          artifacts = []
+          if size <= 50_000_000:
+              shutil.copyfile(source, destination / filename)
+              artifacts.append(filename)
+          else:
+              count = size // 25_000_000 + 1
+              part_size, remainder = divmod(size, count)
+              width = max(3, len(str(count)))
+              with source.open("rb") as stream:
+                  for index in range(count):
+                      name = f"{filename}.{index + 1:0{width}d}"
+                      # Each read is bounded by the 25 MB part limit.
+                      (destination / name).write_bytes(stream.read(part_size + (index < remainder)))
+                      artifacts.append(name)
+          manifest = {
+              "format_version": 1,
+              "version": release["tag_name"][1:],
+              "upstream_tag": release["tag_name"],
+              "platform": "windows-x64",
+              "release_url": release["html_url"],
+              "asset_url": asset["browser_download_url"],
+              "zip": {"filename": filename, "size_bytes": size, "sha256": digest.hexdigest()},
+              "artifacts": artifacts,
+          }
+          (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+
+      - name: Store distribution branch
+        if: steps.release.outputs.skip == 'false'
+        env:
+          BRANCH: ${{ steps.release.outputs.branch }}
+        run: |
+          set -euo pipefail
+          cd "$SYNC_DIR/distribution"
+          git init
+          git checkout --orphan "$BRANCH"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- manifest.json pi-windows-x64.zip*
+          git commit -m "Sync official pi ${BRANCH##*/} for Windows x64"
+          git remote add origin "$REPOSITORY_URL"
+          # An independent root commit cannot fast-forward an existing branch.
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "Synchronized $BRANCH" >> "$GITHUB_STEP_SUMMARY"
