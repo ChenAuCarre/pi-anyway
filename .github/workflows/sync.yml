@@ -13,7 +13,7 @@ on:
 permissions:
   contents: write
 
-# ponytail: serialize all syncs; per-tag locking only if throughput matters.
+# Serialize syncs; GitHub retains only one pending run, replaced by newer requests.
 concurrency:
   group: sync-official-pi-release
   cancel-in-progress: false
@@ -56,6 +56,7 @@ jobs:
           branch="dist/windows-x64/$tag"
           git check-ref-format "refs/heads/$branch"
           gh auth setup-git
+          # Never update an existing version branch.
           existing=$(git ls-remote --heads "$REPOSITORY_URL" "refs/heads/$branch")
           if [[ -n "$existing" ]]; then
             echo "Already synchronized: $branch"
@@ -92,6 +93,7 @@ jobs:
           release = json.loads((root / "release.json").read_text())
           filename = "pi-windows-x64.zip"
           source = root / "download" / filename
+          # Trust the upstream checksum; do not extract or smoke-test.
           entries = []
           for line in (source.parent / "SHA256SUMS").read_text().splitlines():
               fields = line.split()
@@ -119,13 +121,13 @@ jobs:
               shutil.copyfile(source, destination / filename)
               artifacts.append(filename)
           else:
+              # Use one extra part at exact 25 MB multiples.
               count = size // 25_000_000 + 1
               part_size, remainder = divmod(size, count)
               width = max(3, len(str(count)))
               with source.open("rb") as stream:
                   for index in range(count):
                       name = f"{filename}.{index + 1:0{width}d}"
-                      # Each read is bounded by the 25 MB part limit.
                       (destination / name).write_bytes(stream.read(part_size + (index < remainder)))
                       artifacts.append(name)
           manifest = {
@@ -148,6 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SYNC_DIR/distribution"
+          # Use an independent root commit so a normal push cannot update an existing branch.
           git init
           git checkout --orphan "$BRANCH"
           git config user.name 'github-actions[bot]'
@@ -155,6 +158,5 @@ jobs:
           git add -- manifest.json pi-windows-x64.zip*
           git commit -m "Sync official pi ${BRANCH##*/} for Windows x64"
           git remote add origin "$REPOSITORY_URL"
-          # An independent root commit cannot fast-forward an existing branch.
           git push origin "HEAD:refs/heads/$BRANCH"
           echo "Synchronized $BRANCH" >> "$GITHUB_STEP_SUMMARY"
