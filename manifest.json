@@ -1,0 +1,18 @@
+{
+  "format_version": 1,
+  "version": "1.6.1",
+  "upstream_tag": "v1.6.1",
+  "platform": "windows-x64",
+  "release_url": "https://github.com/earendil-works/pi/releases/tag/v1.6.1",
+  "asset_url": "https://github.com/earendil-works/pi/releases/download/v1.6.1/pi-windows-x64.zip",
+  "zip": {
+    "filename": "pi-windows-x64.zip",
+    "size_bytes": 62017479,
+    "sha256": "dbb007c8c50782de1642382fed777c60252aab080f36eef7823324c574c1f3e4"
+  },
+  "artifacts": [
+    "pi-windows-x64.zip.001",
+    "pi-windows-x64.zip.002",
+    "pi-windows-x64.zip.003"
+  ]
+}
